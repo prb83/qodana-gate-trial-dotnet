@@ -12,6 +12,10 @@ concurrency:
   group: quality-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # One exact version of the quality gate; an update is a change of this file.
+  QUALITY_GATE_VERSION: "0.2.0-next.0"
+
 jobs:
   qodana:
     name: Tests and Qodana
@@ -56,6 +60,154 @@ jobs:
           artifact-name: qodana-results
           use-caches: false
           post-pr-comment: true
+
+      # The quality gate reads the result file of the finished Qodana run. Every step from here on
+      # has `if: ${{ !cancelled() }}`: the Qodana step fails when a threshold of qodana.yaml fails,
+      # and the gate must still run and comment.
+      - name: Set up Node for the gate
+        if: ${{ !cancelled() }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      # A clean directory outside the checkout. Only this step gets the packages token.
+      - name: Install the gate
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_PACKAGES_TOKEN: ${{ secrets.DOT_NET_SECRET }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality/gate"
+          cd "$RUNNER_TEMP/quality/gate"
+          echo '{ "private": true }' > package.json
+          printf '%s\n' '@paragondata:registry=https://npm.pkg.github.com' \
+            '//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}' > .npmrc
+          npm install --no-audit --no-fund --ignore-scripts \
+            "@paragondata/factory-quality-gate@$QUALITY_GATE_VERSION"
+
+      - name: Show the gate version
+        if: ${{ !cancelled() }}
+        run: |
+          "$RUNNER_TEMP/quality/gate/node_modules/.bin/factory-quality-gate" --version
+
+      # For the live checks only: what the Qodana step left. It prints a few fields of each result
+      # file and no finding.
+      - name: Show the Qodana results directory
+        if: ${{ !cancelled() }}
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RESULTS: ${{ runner.temp }}/qodana/results
+        run: |
+          echo "event: $GITHUB_EVENT_NAME"
+          echo "head commit: $HEAD_SHA"
+          echo "GITHUB_SHA: $GITHUB_SHA"
+          echo "checked out now: $(git rev-parse HEAD)"
+          ls -la "$RESULTS" || true
+          for file in qodana.sarif.json qodana-short.sarif.json start/qodana.sarif.json end/qodana.sarif.json; do
+            node -e '
+              const fs = require("node:fs");
+              const [file, head] = process.argv.slice(1);
+              if (!fs.existsSync(file)) {
+                console.log(file + ": absent");
+                process.exit(0);
+              }
+              const run = JSON.parse(fs.readFileSync(file, "utf8")).runs?.[0] ?? {};
+              const invocation = run.invocations?.[0] ?? {};
+              const revision = run.versionControlProvenance?.[0]?.revisionId ?? null;
+              const facts = {
+                bytes: fs.statSync(file).size,
+                linter: (run.tool?.driver?.name ?? null) + " " + (run.tool?.driver?.version ?? null),
+                revisionId: revision,
+                revisionIsHead: revision === head,
+                exitCode: invocation.exitCode ?? null,
+                exitCodeDescription: invocation.exitCodeDescription ?? null,
+                analysisKind: run.automationDetails?.properties?.analysisKind ?? null,
+                baselineSource: run.properties?.baselineSource ?? null,
+                coverageFilesProvided: run.properties?.["qodana.coverage.files.provided"] ?? null,
+                coverage: run.properties?.coverage ?? null,
+                results: Array.isArray(run.results) ? run.results.length : null,
+              };
+              console.log(file + ": " + JSON.stringify(facts));
+            ' "$RESULTS/$file" "$HEAD_SHA"
+          done
+
+      # The verdict. A free linter writes no coverage, so the run needs both opt-outs and passes or
+      # fails on Qodana's own result. The step ends with the exit code of the gate: 0 passed,
+      # 2 failed, 1 unavailable.
+      - name: Run the gate
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RESULTS: ${{ runner.temp }}/qodana/results
+        run: |
+          out="$RUNNER_TEMP/quality/out/verdict"
+          mkdir -p "$out"
+          # A push to main has no pull request to comment on.
+          scope=()
+          if [ -n "$PR_NUMBER" ]; then scope=(--pr "$PR_NUMBER" --comment); fi
+          gate=("$RUNNER_TEMP/quality/gate/node_modules/.bin/factory-quality-gate"
+            --analyser qodana
+            --qodana-results "$RESULTS"
+            --without-coverage
+            --without-complexity
+            --commit "$HEAD_SHA"
+            "${scope[@]}"
+            --out "$out/quality.json"
+            --comment-file "$out/comment.md")
+          printf '%q ' "${gate[@]}" | tee "$out/command.txt"
+          echo
+          code=0
+          "${gate[@]}" 2>&1 | tee "$out/output.txt" || code=${PIPESTATUS[0]}
+          echo "$code" > "$out/exit-code.txt"
+          echo "gate exit code: $code"
+          exit "$code"
+
+      # For the live checks only: runs with a missing opt-out, with the default commit, and with
+      # the directory of the first stage. They post no comment and never fail the job.
+      - name: Run the gate variants of the live checks
+        if: ${{ !cancelled() }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RESULTS: ${{ runner.temp }}/qodana/results
+        run: |
+          scope=()
+          if [ -n "$PR_NUMBER" ]; then scope=(--pr "$PR_NUMBER"); fi
+          variant() {
+            local name="$1"
+            shift
+            local out="$RUNNER_TEMP/quality/out/$name"
+            mkdir -p "$out"
+            local gate=("$RUNNER_TEMP/quality/gate/node_modules/.bin/factory-quality-gate"
+              --analyser qodana
+              "$@"
+              "${scope[@]}"
+              --out "$out/quality.json"
+              --comment-file "$out/comment.md"
+              --summary "$out/summary.md")
+            echo "::group::$name"
+            printf '%q ' "${gate[@]}" | tee "$out/command.txt"
+            echo
+            local code=0
+            "${gate[@]}" 2>&1 | tee "$out/output.txt" || code=${PIPESTATUS[0]}
+            echo "$code" > "$out/exit-code.txt"
+            echo "gate exit code: $code"
+            echo "::endgroup::"
+          }
+          variant no-without-complexity --qodana-results "$RESULTS" --without-coverage --commit "$HEAD_SHA"
+          variant no-without-coverage --qodana-results "$RESULTS" --without-complexity --commit "$HEAD_SHA"
+          variant default-commit --qodana-results "$RESULTS" --without-coverage --without-complexity
+          variant start-directory --qodana-results "$RESULTS/start" --without-coverage --without-complexity --commit "$HEAD_SHA"
+
+      - name: Keep the gate reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-reports
+          path: ${{ runner.temp }}/quality/out
+          if-no-files-found: warn
 
       - name: Keep the coverage report
         if: always()
