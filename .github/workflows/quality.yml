@@ -51,7 +51,7 @@ jobs:
       # relative to the project root, and "keep" changes nothing.
       - name: Set the paths of the coverage report
         env:
-          SOURCE_ROOT: /data/project/
+          SOURCE_ROOT: keep
         run: |
           report=.qodana/code-coverage/coverage.info
           if [ "$SOURCE_ROOT" != keep ]; then
