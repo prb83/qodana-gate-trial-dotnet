@@ -3,3 +3,4 @@ version: "1.0"
 linter: jetbrains/qodana-cdnet:2026.3
 dotnet:
   solution: Parcel.sln
+failThreshold: 0
