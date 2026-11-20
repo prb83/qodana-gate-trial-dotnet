@@ -158,8 +158,11 @@ jobs:
             --comment-file "$out/comment.md")
           printf '%q ' "${gate[@]}" | tee "$out/command.txt"
           echo
-          code=0
-          "${gate[@]}" 2>&1 | tee "$out/output.txt" || code=${PIPESTATUS[0]}
+          # The exit code of the gate, not of tee.
+          set +e
+          "${gate[@]}" 2>&1 | tee "$out/output.txt"
+          code=${PIPESTATUS[0]}
+          set -e
           echo "$code" > "$out/exit-code.txt"
           echo "gate exit code: $code"
           exit "$code"
@@ -190,8 +193,11 @@ jobs:
             echo "::group::$name"
             printf '%q ' "${gate[@]}" | tee "$out/command.txt"
             echo
-            local code=0
-            "${gate[@]}" 2>&1 | tee "$out/output.txt" || code=${PIPESTATUS[0]}
+            # The exit code of the gate, not of tee.
+            set +e
+            "${gate[@]}" 2>&1 | tee "$out/output.txt"
+            local code=${PIPESTATUS[0]}
+            set -e
             echo "$code" > "$out/exit-code.txt"
             echo "gate exit code: $code"
             echo "::endgroup::"
