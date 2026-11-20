@@ -45,16 +45,32 @@ jobs:
           -p:CoverletOutputFormat=lcov
           -p:CoverletOutput="$GITHUB_WORKSPACE/.qodana/code-coverage/"
 
-      - name: Show the coverage report
+      # coverlet writes the paths of the runner into the report. Qodana runs in a container with
+      # the project at /data/project. SOURCE_ROOT replaces the workspace path of the runner in
+      # each SF record: "/data/project/" gives the paths of the container, "" gives paths
+      # relative to the project root, and "keep" changes nothing.
+      - name: Set the paths of the coverage report
+        env:
+          SOURCE_ROOT: /data/project/
         run: |
+          report=.qodana/code-coverage/coverage.info
+          if [ "$SOURCE_ROOT" != keep ]; then
+            sed -i "s|^SF:$GITHUB_WORKSPACE/|SF:$SOURCE_ROOT|" "$report"
+          fi
           ls -l .qodana/code-coverage
-          grep -E '^(SF|LF|LH|BRF|BRH):' .qodana/code-coverage/*.info
+          grep -E '^(SF|LF|LH|BRF|BRH):' "$report"
 
+      # The paid linter checks its licence with the project token. Only this step gets the token.
+      # Qodana runs in a container with the project at /data/project, so `args` names the
+      # coverage directory by its path there.
       - name: Run Qodana
         uses: JetBrains/qodana-action@v2026.3.1
+        env:
+          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
         with:
-          # The free .NET linter has no pull-request mode.
-          pr-mode: false
+          args: --coverage-dir /data/project/.qodana/code-coverage
+          # The paid .NET linter has a pull-request mode.
+          pr-mode: true
           results-dir: ${{ runner.temp }}/qodana/results
           upload-result: true
           artifact-name: qodana-results
@@ -125,15 +141,16 @@ jobs:
                 baselineSource: run.properties?.baselineSource ?? null,
                 coverageFilesProvided: run.properties?.["qodana.coverage.files.provided"] ?? null,
                 coverage: run.properties?.coverage ?? null,
+                failureConditions: run.properties?.qodanaFailureConditions ?? null,
                 results: Array.isArray(run.results) ? run.results.length : null,
               };
               console.log(file + ": " + JSON.stringify(facts));
             ' "$RESULTS/$file" "$HEAD_SHA"
           done
 
-      # The verdict. A free linter writes no coverage, so the run needs both opt-outs and passes or
-      # fails on Qodana's own result. The step ends with the exit code of the gate: 0 passed,
-      # 2 failed, 1 unavailable.
+      # The verdict. The paid linter writes the coverage of the new code in pull-request mode, so
+      # the gate checks it against its default minimum. Only complexity is not checked. The step
+      # ends with the exit code of the gate: 0 passed, 2 failed, 1 unavailable.
       - name: Run the gate
         if: ${{ !cancelled() }}
         env:
@@ -150,7 +167,6 @@ jobs:
           gate=("$RUNNER_TEMP/quality/gate/node_modules/.bin/factory-quality-gate"
             --analyser qodana
             --qodana-results "$RESULTS"
-            --without-coverage
             --without-complexity
             --commit "$HEAD_SHA"
             "${scope[@]}"
@@ -167,9 +183,10 @@ jobs:
           echo "gate exit code: $code"
           exit "$code"
 
-      # For the live checks only: runs with a missing opt-out, with the default commit, and with
-      # the directory of the first stage. They post no comment and never fail the job.
-      - name: Run the gate variants of the live checks
+      # For the trial checks only: Qodana's own result alone, the directory of the first stage, and
+      # the coverage minimum at and just above the value of the file. They post no comment and
+      # never fail the job.
+      - name: Run the gate variants of the trial checks
         if: ${{ !cancelled() }}
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -202,10 +219,31 @@ jobs:
             echo "gate exit code: $code"
             echo "::endgroup::"
           }
-          variant no-without-complexity --qodana-results "$RESULTS" --without-coverage --commit "$HEAD_SHA"
-          variant no-without-coverage --qodana-results "$RESULTS" --without-complexity --commit "$HEAD_SHA"
-          variant default-commit --qodana-results "$RESULTS" --without-coverage --without-complexity
-          variant start-directory --qodana-results "$RESULTS/start" --without-coverage --without-complexity --commit "$HEAD_SHA"
+          variant both-opt-outs --qodana-results "$RESULTS" --without-coverage --without-complexity --commit "$HEAD_SHA"
+          variant start-directory --qodana-results "$RESULTS/start" --without-complexity --commit "$HEAD_SHA"
+          # The line coverage of the new code as the gate computes it: covered lines by lines,
+          # rounded down to one decimal. Empty when the file has no usable counts.
+          value="$(node -e '
+            const fs = require("node:fs");
+            let coverage;
+            try {
+              coverage = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).runs?.[0]?.properties?.coverage;
+            } catch {
+              coverage = undefined;
+            }
+            const lines = coverage?.freshLines;
+            const covered = coverage?.freshCoveredLines;
+            const counts = [lines, covered].every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0);
+            if (counts && lines > 0 && covered <= lines) {
+              console.log(Math.floor((covered * 1000) / lines) / 10);
+            }
+          ' "$RESULTS/qodana.sarif.json")"
+          echo "line coverage of the new code, from the two counts of the file: ${value:-none}"
+          if [ -n "$value" ]; then
+            above="$(node -e 'console.log((Number(process.argv[1]) + 0.1).toFixed(1))' "$value")"
+            variant minimum-at --qodana-results "$RESULTS" --without-complexity --commit "$HEAD_SHA" --coverage-minimum "$value"
+            variant minimum-above --qodana-results "$RESULTS" --without-complexity --commit "$HEAD_SHA" --coverage-minimum "$above"
+          fi
 
       - name: Keep the gate reports
         if: ${{ !cancelled() }}
