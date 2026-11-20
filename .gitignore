@@ -1,0 +1,6 @@
+bin/
+obj/
+TestResults/
+.qodana/
+.vs/
+*.user

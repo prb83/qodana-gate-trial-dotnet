@@ -1,0 +1,5 @@
+version: "1.0"
+# The free linter. It runs without a token, reads no coverage report and has no pull-request mode.
+linter: jetbrains/qodana-cdnet:2026.3
+dotnet:
+  solution: Parcel.sln

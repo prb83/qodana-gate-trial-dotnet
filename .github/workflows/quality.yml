@@ -1,0 +1,66 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qodana:
+    name: Tests and Qodana
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Check out the commit of the pull request
+        uses: actions/checkout@v5
+        with:
+          # The head commit, not the merge commit; the full history for the pull-request mode.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Run the tests with coverage
+        run: >
+          dotnet test Parcel.sln
+          -p:CollectCoverage=true
+          -p:CoverletOutputFormat=lcov
+          -p:CoverletOutput="$GITHUB_WORKSPACE/.qodana/code-coverage/"
+
+      - name: Show the coverage report
+        run: |
+          ls -l .qodana/code-coverage
+          grep -E '^(SF|LF|LH|BRF|BRH):' .qodana/code-coverage/*.info
+
+      - name: Run Qodana
+        uses: JetBrains/qodana-action@v2026.3.1
+        with:
+          # The free .NET linter has no pull-request mode.
+          pr-mode: false
+          results-dir: ${{ runner.temp }}/qodana/results
+          upload-result: true
+          artifact-name: qodana-results
+          use-caches: false
+          post-pr-comment: true
+
+      - name: Keep the coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          include-hidden-files: true
+          path: .qodana/code-coverage/
