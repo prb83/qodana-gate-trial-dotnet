@@ -61,14 +61,12 @@ jobs:
           grep -E '^(SF|LF|LH|BRF|BRH):' "$report"
 
       # The paid linter checks its licence with the project token. Only this step gets the token.
-      # Qodana runs in a container with the project at /data/project, so `args` names the
-      # coverage directory by its path there.
+      # No coverage directory is named: Qodana looks in .qodana/code-coverage by itself.
       - name: Run Qodana
         uses: JetBrains/qodana-action@v2026.3.1
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
         with:
-          args: --coverage-dir /data/project/.qodana/code-coverage
           # The paid .NET linter has a pull-request mode.
           pr-mode: true
           results-dir: ${{ runner.temp }}/qodana/results
