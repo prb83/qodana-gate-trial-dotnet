@@ -70,7 +70,8 @@ jobs:
           # The paid .NET linter has a pull-request mode.
           pr-mode: true
           results-dir: ${{ runner.temp }}/qodana/results
-          upload-result: true
+          # The repository is public: the action uploads nothing. See the step that keeps the result files.
+          upload-result: false
           artifact-name: qodana-results
           use-caches: false
           post-pr-comment: true
@@ -242,6 +243,37 @@ jobs:
             variant minimum-at --qodana-results "$RESULTS" --without-complexity --commit "$HEAD_SHA" --coverage-minimum "$value"
             variant minimum-above --qodana-results "$RESULTS" --without-complexity --commit "$HEAD_SHA" --coverage-minimum "$above"
           fi
+
+      # The repository is public: only the result files of Qodana are kept, never its log folder.
+      # Nothing is kept when the text of the token is in one of the files.
+      - name: Collect the Qodana result files
+        if: ${{ !cancelled() }}
+        env:
+          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
+          RESULTS: ${{ runner.temp }}/qodana/results
+        run: |
+          keep="$RUNNER_TEMP/qodana/keep"
+          mkdir -p "$keep"
+          for file in qodana.sarif.json qodana-short.sarif.json start/qodana.sarif.json end/qodana.sarif.json log/changes.json report/results/coverageInformation.json; do
+            if [ -f "$RESULTS/$file" ]; then
+              mkdir -p "$keep/$(dirname "$file")"
+              cp "$RESULTS/$file" "$keep/$file"
+            fi
+          done
+          ls -lR "$keep"
+          if [ -n "$QODANA_TOKEN" ] && grep -rlF -f <(printf '%s' "$QODANA_TOKEN") "$keep"; then
+            echo "The text of the token is in the files named above. Nothing is kept."
+            rm -rf "$keep"
+            exit 1
+          fi
+
+      - name: Keep the Qodana result files
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qodana-result-files
+          path: ${{ runner.temp }}/qodana/keep
+          if-no-files-found: warn
 
       - name: Keep the gate reports
         if: ${{ !cancelled() }}
